@@ -1,0 +1,34 @@
+[project]
+name = "mas-evaluate-pipeline"
+version = "0.1.0"
+description = "SWE-bench communication benchmark pipeline for single-agent and multi-agent systems"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic",
+    "typer",
+    "openai",
+    "datasets",
+    "swebench>=4.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+mas-evaluate = "mas_evaluate_pipeline.cli:app"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+norecursedirs = [".cache", "runs", "reports"]

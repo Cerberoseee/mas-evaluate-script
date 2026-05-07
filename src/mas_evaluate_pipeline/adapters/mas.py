@@ -1,0 +1,20 @@
+"""MAS system command adapters."""
+
+from __future__ import annotations
+
+from ..models import AdapterConfig, ArmName
+from .command import CommandAdapter
+
+
+class MasCentralizeAdapter(CommandAdapter):
+    arm = ArmName.MAS_CENTRALIZE
+
+    def __init__(self, study_config, adapter_config: AdapterConfig) -> None:
+        super().__init__(study_config, adapter_config)
+
+
+class MasDecentralizedAdapter(CommandAdapter):
+    arm = ArmName.MAS_DECENTRALIZED
+
+    def __init__(self, study_config, adapter_config: AdapterConfig) -> None:
+        super().__init__(study_config, adapter_config)

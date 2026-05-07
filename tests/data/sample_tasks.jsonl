@@ -1,0 +1,2 @@
+{"instance_id":"repo__issue-1","repo":"example/repo","base_commit":"HEAD","problem_statement":"Fix the failing behavior in foo.py","version":"1.0","hints_text":"Look near foo.py","FAIL_TO_PASS":["tests/test_foo.py::test_fix"],"PASS_TO_PASS":["tests/test_foo.py::test_existing"]}
+{"instance_id":"repo__issue-2","repo":"example/repo","base_commit":"HEAD","problem_statement":"Fix another bug","version":"1.0","FAIL_TO_PASS":["tests/test_bar.py::test_fix"]}
