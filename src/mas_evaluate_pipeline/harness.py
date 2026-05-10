@@ -66,9 +66,9 @@ _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
     # ``*/setup_package.py`` files import numpy during ``prepare_metadata_for_build_editable``.
     # hypothesis is also here because astropy's [test] extra omits it.
     "astropy/astropy": [
-        "numpy",
+        "numpy<2",          # numpy 2.x changed PyArray_* arg types; astropy 5.x C code needs 1.x
         "cython",
-        "setuptools<67.3",
+        "setuptools<67.3",  # dep_util removed in 67.3.0; used by astropy/wcs/setup_package.py
         "wheel",
         "extension-helpers",
         "hypothesis",
