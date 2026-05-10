@@ -14,24 +14,52 @@ from .models import FailureClass, GradeResult, HarnessConfig, PreparedTask, RunR
 
 logger = logging.getLogger(__name__)
 
-# Common test-dependency packages installed in every provisioned venv.
-# numpy is intentionally NOT pinned here: repos that need numpy<2 include it
-# in their _REPO_PROVISION_EXTRAS. Putting numpy<2 here breaks installs on
-# Python 3.13 (no NumPy 1.x wheels), which causes the entire install to fail
-# and leaves pytest missing from venv/bin.
+# ── Provision configuration ────────────────────────────────────────────────────
+#
+# The strategy follows the official SWE-bench harness (swebench/harness/constants/python.py):
+#
+#   1. Create a uv-managed venv with the correct Python version.
+#   2. Install any pre-install packages (build deps or pinned runtime deps).
+#   3. For repos that support it, run `pip install -e .[test]` (editable install).
+#      This compiles C/Cython extensions and pulls in the full declared test stack —
+#      the same steps the official Docker-based harness performs.
+#   4. For repos that do NOT support editable install, fall back to installing a
+#      common baseline (pytest, hypothesis, packaging) plus repo-specific extras.
+#   5. Write any file stubs needed for repos that still can't be editably installed.
+
+# Baseline packages for repos without an editable install (step 4 above).
 _COMMON_PROVISION_PACKAGES: list[str] = [
     "pytest",
     "hypothesis",
     "packaging",
 ]
 
-# Per-repo additional packages, keyed by "org/repo".
+# Repos that support `pip install -e .[test]` (or equivalent).
+# Key   → "org/repo"
+# Value → pip argument list appended after `pip install`  (e.g. ["-e", ".[test]"])
+#
+# Mirrors the "install" field in SWE-bench constants/python.py SPECS_*.
+# When a repo is listed here its _REPO_PROVISION_EXTRAS are installed FIRST
+# (build deps), then the editable install runs. Common packages are skipped
+# because the editable install pulls in the full test stack from the repo's
+# own setup.cfg / pyproject.toml.
+_REPO_EDITABLE_INSTALL: dict[str, list[str]] = {
+    # astropy v5.x: compiles _compiler.so, _parse_times.so, erfa, etc.
+    # Pulls in pytest-astropy, pytest-doctestplus, pytest-xdist, etc.
+    "astropy/astropy": ["-e", ".[test]", "--verbose"],
+}
+
+# Packages installed BEFORE the editable install (build deps for compiled repos)
+# or instead of it (runtime extras for repos without editable install).
 _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
-    # numpy<2 is placed here rather than common packages because NumPy 1.x has
-    # no Python 3.13 wheels; keeping it repo-scoped avoids breaking the common
-    # install when uv falls back to a newer Python.
-    # pytest-doctestplus provides the --doctest-rst flag used in setup.cfg addopts.
-    "astropy/astropy": ["numpy<2", "pyerfa", "pyyaml", "extension-helpers", "pytest-doctestplus"],
+    # Build deps needed so `pip install -e .[test]` can compile Cython extensions.
+    # hypothesis is also here because astropy's [test] extra omits it.
+    "astropy/astropy": [
+        "cython",
+        "setuptools",
+        "extension-helpers",
+        "hypothesis",
+    ],
     "django/django": ["sqlparse", "asgiref"],
     "matplotlib/matplotlib": [
         "pillow", "contourpy", "cycler", "fonttools",
@@ -40,7 +68,9 @@ _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
     "pallets/flask": ["click", "itsdangerous", "jinja2", "markupsafe", "werkzeug"],
     "psf/requests": ["certifi", "charset-normalizer", "idna", "urllib3"],
     "pytest-dev/pytest": ["pluggy", "iniconfig", "attrs"],
-    "scikit-learn/scikit-learn": ["scipy", "joblib", "threadpoolctl"],
+    "scikit-learn/scikit-learn": [
+        "cython", "setuptools", "scipy", "joblib", "threadpoolctl",
+    ],
     "sphinx-doc/sphinx": ["docutils", "jinja2", "pygments", "babel"],
     "sympy/sympy": [],
     "pydata/xarray": ["scipy", "pandas", "netCDF4"],
@@ -51,22 +81,12 @@ _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
     "pylint-dev/astroid": [],
 }
 
-# Repo-specific file stubs written after venv creation.
-# Prevents import-time warnings (e.g. astropy version detection) from
-# being treated as errors by conftest before the agent even starts.
+# File stubs written into the workspace for repos that cannot be editably
+# installed (e.g. missing build toolchain). Stubs are added to .git/info/exclude
+# so `git add -A` never commits them into the agent's patch.
+# Repos using editable install do NOT need stubs — compiled extensions are real.
 _REPO_VERSION_STUBS: dict[str, list[tuple[str, str]]] = {
-    "astropy/astropy": [
-        # Prevents scm-detection from raising a warning-as-error on __version__.
-        ("astropy/_version.py", "version = '0.0.0.dev0'\n"),
-        # astropy/__init__.py does `from .utils import _compiler` (a C extension
-        # that is only present after `setup.py build_ext`). This stub satisfies
-        # that import so conftest can load without a full build.
-        ("astropy/utils/_compiler.py", "compiler = 'stub'\n"),
-        # conftest.py:65 imports astropy.utils.iers → astropy.time → formats.py
-        # → `from . import _parse_times` (a Cython extension). This stub lets
-        # the import chain complete so pytest_configure does not crash.
-        ("astropy/time/_parse_times.py", "# stub for Cython extension\n"),
-    ],
+    # No stubs needed for astropy when editable install is active.
 }
 
 
@@ -234,19 +254,23 @@ class WorkspacePreparer:
         *,
         progress: Callable[[str], None] | None = None,
     ) -> None:
-        workspace_dir = workspace_dir.resolve()  # must be absolute so uv venv path args are unambiguous
-        """Create workspace/venv/, install test deps, and write version stubs.
+        """Create workspace/venv/, install test deps, and optionally run editable install.
 
-        Runs as best-effort: failures are logged and reported via ``progress``
-        but do not abort the run. The agent will still start and may recover;
-        a broken provision is far less wasteful than a hard REPOSITORY_PREPARATION
-        failure when the problem is just a missing optional dep.
+        Mirrors the official SWE-bench harness strategy:
+          - Repos with compiled extensions: pre-install build deps, then
+            `pip install -e .[test]` (compiles C/Cython, pulls in full test stack).
+          - Repos without editable install: install common baseline + repo extras.
+
+        Runs best-effort: failures are logged but do not abort the run.
         """
+        workspace_dir = workspace_dir.resolve()
         python_version = (
             self._config.provision_python_versions.get(task.repo)
             or self._config.provision_python_version
         )
         venv_dir = workspace_dir / "venv"
+        venv_python = venv_dir / "bin" / "python"
+        venv_pip = venv_dir / "bin" / "pip"
         prefix = f"[provision] repo={task.repo} python={python_version}"
 
         def _log(msg: str) -> None:
@@ -254,30 +278,29 @@ class WorkspacePreparer:
             if progress:
                 progress(f"{prefix} {msg}")
 
-        # Step 1: resolve the exact Python binary path via uv, then create the venv.
-        #
-        # We use ``uv python find`` rather than passing a bare version string to
-        # ``uv venv --python X.Y`` because the bare version can silently resolve to
-        # the system Python (e.g. 3.13) if uv's PATH resolution is ambiguous — which
-        # causes numpy<2 to fail later with no compatible wheels. Passing an absolute
-        # path leaves no room for fallback.
+        def _uv_pip(*args: str) -> None:
+            self._run_captured(
+                ["uv", "pip", "install", "--python", str(venv_python)] + list(args),
+                cwd=workspace_dir,
+            )
+
+        # ── Step 1: resolve Python and create venv ─────────────────────────────
+        # Use `uv python find` to get the absolute path so uv never silently
+        # falls back to the system Python when the requested version is available.
         python_executable: str | None = None
         try:
-            _log(f"resolving Python {python_version} path via uv")
+            _log(f"resolving Python {python_version} via uv")
             self._run_captured(["uv", "python", "install", python_version], cwd=workspace_dir)
             raw = self._run_captured(["uv", "python", "find", python_version], cwd=workspace_dir)
-            # uv may print a project-compatibility warning on stderr (merged into
-            # stdout by _run_captured) before the resolved path.  The path is
-            # always the last non-empty line.
             lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             found = lines[-1] if lines else ""
             if found and found.startswith("/"):
                 python_executable = found
-                _log(f"resolved Python {python_version} at {python_executable}")
+                _log(f"resolved Python {python_version} → {python_executable}")
         except Exception as exc:  # noqa: BLE001
-            _log(f"WARNING: could not resolve Python {python_version} via uv — {exc}; will try bare version string")
+            _log(f"WARNING: could not resolve Python {python_version} via uv — {exc}; trying bare version")
 
-        python_arg = python_executable if python_executable else python_version
+        python_arg = python_executable or python_version
         try:
             _log(f"creating venv at {venv_dir} using {python_arg}")
             self._run_captured(
@@ -288,74 +311,84 @@ class WorkspacePreparer:
             _log(f"WARNING: venv creation failed — {exc}; agent will start without pre-provisioned env")
             return
 
-        # Sanity-check: confirm the venv is the requested version, not a silent fallback.
         try:
             actual_ver = self._run_captured(
-                [str(venv_dir / "bin" / "python"), "-c",
+                [str(venv_python), "-c",
                  "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
                 cwd=workspace_dir,
             ).strip()
             expected_prefix = ".".join(python_version.split(".")[:2])
             if not actual_ver.startswith(expected_prefix):
-                _log(
-                    f"WARNING: venv Python is {actual_ver}, expected {python_version}; "
-                    "numpy<2 and other version-pinned packages may fail"
-                )
+                _log(f"WARNING: venv is Python {actual_ver}, expected {python_version}")
             else:
-                _log(f"venv Python version confirmed: {actual_ver}")
+                _log(f"venv Python confirmed: {actual_ver}")
         except Exception as exc:  # noqa: BLE001
-            _log(f"WARNING: could not verify venv Python version — {exc}")
+            _log(f"WARNING: could not verify venv Python — {exc}")
 
-        # Step 2: install common packages.
-        packages = list(_COMMON_PROVISION_PACKAGES) + list(self._config.provision_extra_packages)
-        try:
-            _log(f"installing common packages: {packages}")
-            self._run_captured(
-                ["uv", "pip", "install", "--python", str(venv_dir / "bin" / "python")] + packages,
-                cwd=workspace_dir,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log(f"WARNING: common package install failed — {exc}")
+        editable_args = _REPO_EDITABLE_INSTALL.get(task.repo)
 
-        # Step 3: install repo-specific extras.
+        # ── Step 2: pre-install packages ───────────────────────────────────────
+        # For repos with editable install: just build deps (extras list).
+        # For repos without: common baseline + extras + any user-supplied packages.
         extras = _REPO_PROVISION_EXTRAS.get(task.repo, [])
-        if extras:
+        if editable_args:
+            if extras:
+                try:
+                    _log(f"installing build deps: {extras}")
+                    _uv_pip(*extras)
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"WARNING: build dep install failed — {exc}")
+        else:
+            packages = (
+                list(_COMMON_PROVISION_PACKAGES)
+                + list(self._config.provision_extra_packages)
+                + extras
+            )
             try:
-                _log(f"installing repo extras: {extras}")
+                _log(f"installing packages: {packages}")
+                _uv_pip(*packages)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"WARNING: package install failed — {exc}")
+
+        # ── Step 3: editable install (mirrors official harness `install` command) ──
+        # Uses the venv's pip directly so the build system (setuptools/Cython)
+        # compiles extensions into the venv's site-packages.
+        if editable_args:
+            _log(f"running editable install: pip install {' '.join(editable_args)}")
+            try:
                 self._run_captured(
-                    ["uv", "pip", "install", "--python", str(venv_dir / "bin" / "python")] + extras,
+                    [str(venv_pip), "install"] + list(editable_args),
                     cwd=workspace_dir,
                 )
+                _log("editable install complete")
             except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: repo extras install failed — {exc}")
+                _log(f"WARNING: editable install failed — {exc}; agent may lack compiled extensions")
 
-        # Step 4: write version stubs to silence scm-detection warnings-as-errors.
+        # ── Step 4: file stubs (fallback for repos without editable install) ───
+        # With a successful editable install, C extensions are real compiled .so
+        # files — no stubs needed. Stubs are still supported for repos that cannot
+        # be editably installed.
         stubs = _REPO_VERSION_STUBS.get(task.repo, [])
         for rel_path, content in stubs:
             target = workspace_dir / rel_path
             try:
                 target.write_text(content, encoding="utf-8")
-                _log(f"wrote version stub: {rel_path}")
+                _log(f"wrote stub: {rel_path}")
             except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: could not write version stub {rel_path} — {exc}")
+                _log(f"WARNING: could not write stub {rel_path} — {exc}")
 
-        # Step 5: exclude stub files from git so `git add -A` won't commit them
-        # into the agent's patch.  .git/info/exclude acts as a per-repo local
-        # gitignore and is never itself committed, so it's safe to append to.
+        # Exclude stubs from git so they never appear in the agent's patch.diff.
         if stubs:
             exclude_file = workspace_dir / ".git" / "info" / "exclude"
             try:
                 existing = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
-                new_entries = [
-                    rel_path for rel_path, _ in stubs
-                    if rel_path not in existing
-                ]
+                new_entries = [p for p, _ in stubs if p not in existing]
                 if new_entries:
                     with exclude_file.open("a", encoding="utf-8") as fh:
                         fh.write("\n# provision stubs – do not commit\n")
-                        for rel_path in new_entries:
-                            fh.write(f"{rel_path}\n")
-                    _log(f"excluded provision stubs from git: {new_entries}")
+                        for p in new_entries:
+                            fh.write(f"{p}\n")
+                    _log(f"excluded stubs from git: {new_entries}")
             except Exception as exc:  # noqa: BLE001
                 _log(f"WARNING: could not update .git/info/exclude — {exc}")
 
