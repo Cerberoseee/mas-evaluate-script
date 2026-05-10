@@ -46,17 +46,26 @@ _COMMON_PROVISION_PACKAGES: list[str] = [
 _REPO_EDITABLE_INSTALL: dict[str, list[str]] = {
     # astropy v5.x: compiles _compiler.so, _parse_times.so, erfa, etc.
     # Pulls in pytest-astropy, pytest-doctestplus, pytest-xdist, etc.
-    "astropy/astropy": ["-e", ".[test]", "--verbose"],
+    # --no-build-isolation: use the venv's pinned setuptools<67.3 during the
+    # build instead of letting uv pull setuptools 82.x into a fresh isolated env
+    # (which would break `from setuptools.dep_util import newer_group` in
+    # astropy/wcs/setup_package.py).
+    "astropy/astropy": ["-e", ".[test]", "--verbose", "--no-build-isolation"],
 }
 
 # Packages installed BEFORE the editable install (build deps for compiled repos)
 # or instead of it (runtime extras for repos without editable install).
 _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
     # Build deps needed so `pip install -e .[test]` can compile Cython extensions.
+    # setuptools is pinned to <67.3 because astropy/wcs/setup_package.py at this
+    # era uses `from setuptools.dep_util import newer_group`, which was removed in
+    # setuptools 67.3.0.  The editable install runs with --no-build-isolation so it
+    # uses the venv's pinned setuptools rather than pulling the latest in an
+    # isolated build env.
     # hypothesis is also here because astropy's [test] extra omits it.
     "astropy/astropy": [
         "cython",
-        "setuptools",
+        "setuptools<67.3",
         "extension-helpers",
         "hypothesis",
     ],
