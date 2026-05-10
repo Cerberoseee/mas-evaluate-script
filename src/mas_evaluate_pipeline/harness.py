@@ -53,6 +53,18 @@ _REPO_EDITABLE_INSTALL: dict[str, list[str]] = {
     "astropy/astropy": ["-e", ".[test]", "--verbose", "--no-build-isolation"],
 }
 
+# Extra environment variables injected only during the editable-install step.
+# Useful to pass compiler flags that silence host-compiler-version-specific
+# errors without altering the globally installed build tools.
+_REPO_EDITABLE_INSTALL_ENV: dict[str, dict[str, str]] = {
+    # wcslib_celprm_wrap.c:167 assigns PyCelprm_new() (returns PyObject*) into a
+    # PyCelprm* variable.  GCC < 14 treats this as a warning; GCC 14 (Ubuntu
+    # 24.04) promotes -Wincompatible-pointer-types to a hard error in gnu99 mode.
+    # The SWE-bench Docker was built on Ubuntu 22.04 with GCC 11, so this was
+    # never an issue there.  Suppress the diagnostic to match that behaviour.
+    "astropy/astropy": {"CFLAGS": "-Wno-incompatible-pointer-types"},
+}
+
 # Packages installed BEFORE the editable install (build deps for compiled repos)
 # or instead of it (runtime extras for repos without editable install).
 _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
@@ -290,10 +302,11 @@ class WorkspacePreparer:
             if progress:
                 progress(f"{prefix} {msg}")
 
-        def _uv_pip(*args: str) -> None:
+        def _uv_pip(*args: str, extra_env: dict[str, str] | None = None) -> None:
             self._run_captured(
                 ["uv", "pip", "install", "--python", str(venv_python)] + list(args),
                 cwd=workspace_dir,
+                extra_env=extra_env,
             )
 
         # ── Step 1: resolve Python and create venv ─────────────────────────────
@@ -368,8 +381,11 @@ class WorkspacePreparer:
         # Cython) to compile extensions into the venv's site-packages.
         if editable_args:
             _log(f"running editable install: uv pip install {' '.join(editable_args)}")
+            build_env = _REPO_EDITABLE_INSTALL_ENV.get(task.repo)
+            if build_env:
+                _log(f"injecting build env: {build_env}")
             try:
-                _uv_pip(*editable_args)
+                _uv_pip(*editable_args, extra_env=build_env)
                 _log("editable install complete")
             except Exception as exc:  # noqa: BLE001
                 _log(f"WARNING: editable install failed — {exc}; agent may lack compiled extensions")
@@ -455,11 +471,20 @@ class WorkspacePreparer:
             )
 
     @staticmethod
-    def _run_captured(command: list[str], *, cwd: Path) -> str:
+    def _run_captured(
+        command: list[str],
+        *,
+        cwd: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
         """Run a command and return combined stdout+stderr; raise RuntimeError on non-zero exit."""
+        env: dict[str, str] | None = None
+        if extra_env:
+            env = {**os.environ, **extra_env}
         completed = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
