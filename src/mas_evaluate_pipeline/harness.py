@@ -62,10 +62,14 @@ _REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
     # setuptools 67.3.0.  The editable install runs with --no-build-isolation so it
     # uses the venv's pinned setuptools rather than pulling the latest in an
     # isolated build env.
+    # numpy must be present before ``uv pip install -e . --no-build-isolation``: several
+    # ``*/setup_package.py`` files import numpy during ``prepare_metadata_for_build_editable``.
     # hypothesis is also here because astropy's [test] extra omits it.
     "astropy/astropy": [
+        "numpy",
         "cython",
         "setuptools<67.3",
+        "wheel",
         "extension-helpers",
         "hypothesis",
     ],
