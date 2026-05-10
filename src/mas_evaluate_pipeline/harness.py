@@ -16,102 +16,45 @@ logger = logging.getLogger(__name__)
 
 # ── Provision configuration ────────────────────────────────────────────────────
 #
-# The strategy follows the official SWE-bench harness (swebench/harness/constants/python.py):
+# Strategy (mirrors the official SWE-bench harness Docker build):
 #
 #   1. Create a uv-managed venv with the correct Python version.
-#   2. Install any pre-install packages (build deps or pinned runtime deps).
-#   3. For repos that support it, run `pip install -e .[test]` (editable install).
-#      This compiles C/Cython extensions and pulls in the full declared test stack —
-#      the same steps the official Docker-based harness performs.
-#   4. For repos that do NOT support editable install, fall back to installing a
-#      common baseline (pytest, hypothesis, packaging) plus repo-specific extras.
-#   5. Write any file stubs needed for repos that still can't be editably installed.
+#   2. Pre-install universal build tools so compiled packages can build.
+#   3. If the task has an environment_setup_commit:
+#        a. git checkout that commit inside the workspace clone.
+#        b. pip install -e .[test]  (or fall back to -e .)  with --no-build-isolation
+#           so the pinned build tools above are used by the build backend.
+#        c. git checkout back to base_commit.
+#      The .so files compiled from environment_setup_commit stay in the venv
+#      exactly as they would in the official Docker image.
+#   4. If no environment_setup_commit, attempt the same editable install from
+#      whatever commit is currently checked out (best-effort).
 
-# Baseline packages for repos without an editable install (step 4 above).
-_COMMON_PROVISION_PACKAGES: list[str] = [
-    "pytest",
+# Build tools pre-installed before any editable install.
+#
+# setuptools<67.3: dep_util (used by several setup_package.py files of that era)
+#   was removed in 67.3.0.  Pinned here so --no-build-isolation picks it up
+#   instead of letting pip/uv resolve the latest in an isolated build env.
+# numpy<2: numpy 2.x tightened PyArray_* argument types; C extensions written
+#   against numpy 1.x headers fail to compile with numpy 2.x headers.
+# hypothesis: omitted from many [test] extras but required by several test suites.
+_BUILD_PRE_DEPS: list[str] = [
+    "cython",
+    "wheel",
+    "setuptools<67.3",
+    "numpy<2",
+    "extension-helpers",
     "hypothesis",
+    "pytest",
     "packaging",
 ]
 
-# Repos that support `pip install -e .[test]` (or equivalent).
-# Key   → "org/repo"
-# Value → pip argument list appended after `pip install`  (e.g. ["-e", ".[test]"])
-#
-# Mirrors the "install" field in SWE-bench constants/python.py SPECS_*.
-# When a repo is listed here its _REPO_PROVISION_EXTRAS are installed FIRST
-# (build deps), then the editable install runs. Common packages are skipped
-# because the editable install pulls in the full test stack from the repo's
-# own setup.cfg / pyproject.toml.
-_REPO_EDITABLE_INSTALL: dict[str, list[str]] = {
-    # astropy v5.x: compiles _compiler.so, _parse_times.so, erfa, etc.
-    # Pulls in pytest-astropy, pytest-doctestplus, pytest-xdist, etc.
-    # --no-build-isolation: use the venv's pinned setuptools<67.3 during the
-    # build instead of letting uv pull setuptools 82.x into a fresh isolated env
-    # (which would break `from setuptools.dep_util import newer_group` in
-    # astropy/wcs/setup_package.py).
-    "astropy/astropy": ["-e", ".[test]", "--verbose", "--no-build-isolation"],
-}
-
-# Extra environment variables injected only during the editable-install step.
-# Useful to pass compiler flags that silence host-compiler-version-specific
-# errors without altering the globally installed build tools.
-_REPO_EDITABLE_INSTALL_ENV: dict[str, dict[str, str]] = {
-    # wcslib_celprm_wrap.c:167 assigns PyCelprm_new() (returns PyObject*) into a
-    # PyCelprm* variable.  GCC < 14 treats this as a warning; GCC 14 (Ubuntu
-    # 24.04) promotes -Wincompatible-pointer-types to a hard error in gnu99 mode.
-    # The SWE-bench Docker was built on Ubuntu 22.04 with GCC 11, so this was
-    # never an issue there.  Suppress the diagnostic to match that behaviour.
-    "astropy/astropy": {"CFLAGS": "-Wno-incompatible-pointer-types"},
-}
-
-# Packages installed BEFORE the editable install (build deps for compiled repos)
-# or instead of it (runtime extras for repos without editable install).
-_REPO_PROVISION_EXTRAS: dict[str, list[str]] = {
-    # Build deps needed so `pip install -e .[test]` can compile Cython extensions.
-    # setuptools is pinned to <67.3 because astropy/wcs/setup_package.py at this
-    # era uses `from setuptools.dep_util import newer_group`, which was removed in
-    # setuptools 67.3.0.  The editable install runs with --no-build-isolation so it
-    # uses the venv's pinned setuptools rather than pulling the latest in an
-    # isolated build env.
-    # numpy must be present before ``uv pip install -e . --no-build-isolation``: several
-    # ``*/setup_package.py`` files import numpy during ``prepare_metadata_for_build_editable``.
-    # hypothesis is also here because astropy's [test] extra omits it.
-    "astropy/astropy": [
-        "numpy<2",          # numpy 2.x changed PyArray_* arg types; astropy 5.x C code needs 1.x
-        "cython",
-        "setuptools<67.3",  # dep_util removed in 67.3.0; used by astropy/wcs/setup_package.py
-        "wheel",
-        "extension-helpers",
-        "hypothesis",
-    ],
-    "django/django": ["sqlparse", "asgiref"],
-    "matplotlib/matplotlib": [
-        "pillow", "contourpy", "cycler", "fonttools",
-        "kiwisolver", "pyparsing", "python-dateutil",
-    ],
-    "pallets/flask": ["click", "itsdangerous", "jinja2", "markupsafe", "werkzeug"],
-    "psf/requests": ["certifi", "charset-normalizer", "idna", "urllib3"],
-    "pytest-dev/pytest": ["pluggy", "iniconfig", "attrs"],
-    "scikit-learn/scikit-learn": [
-        "cython", "setuptools", "scipy", "joblib", "threadpoolctl",
-    ],
-    "sphinx-doc/sphinx": ["docutils", "jinja2", "pygments", "babel"],
-    "sympy/sympy": [],
-    "pydata/xarray": ["scipy", "pandas", "netCDF4"],
-    "marshmallow-code/marshmallow": [],
-    "mwaskom/seaborn": ["pandas", "scipy", "statsmodels"],
-    "sqlfluff/sqlfluff": ["appdirs", "colorama", "tqdm", "toml"],
-    "pylint-dev/pylint": ["astroid", "isort", "mccabe", "tomlkit"],
-    "pylint-dev/astroid": [],
-}
-
-# File stubs written into the workspace for repos that cannot be editably
-# installed (e.g. missing build toolchain). Stubs are added to .git/info/exclude
-# so `git add -A` never commits them into the agent's patch.
-# Repos using editable install do NOT need stubs — compiled extensions are real.
-_REPO_VERSION_STUBS: dict[str, list[tuple[str, str]]] = {
-    # No stubs needed for astropy when editable install is active.
+# Environment variables injected for every editable-install subprocess.
+# GCC ≥ 14 (Ubuntu 24.04) promotes -Wincompatible-pointer-types to a hard error
+# in gnu99 mode.  The SWE-bench Docker was built on Ubuntu 22.04 / GCC 11 where
+# it was only a warning.  Suppress it unconditionally — harmless on older GCC.
+_BUILD_ENV: dict[str, str] = {
+    "CFLAGS": "-Wno-incompatible-pointer-types",
 }
 
 
@@ -279,14 +222,20 @@ class WorkspacePreparer:
         *,
         progress: Callable[[str], None] | None = None,
     ) -> None:
-        """Create workspace/venv/, install test deps, and optionally run editable install.
+        """Create workspace/venv/ and install dependencies via editable install.
 
-        Mirrors the official SWE-bench harness strategy:
-          - Repos with compiled extensions: pre-install build deps, then
-            `pip install -e .[test]` (compiles C/Cython, pulls in full test stack).
-          - Repos without editable install: install common baseline + repo extras.
+        Mirrors the official SWE-bench Docker build:
+          1. Create venv with the configured Python version.
+          2. Pre-install universal build tools (_BUILD_PRE_DEPS).
+          3. If task.environment_setup_commit is set, check out that commit,
+             run `pip install -e .[test]` (falling back to `-e .`), then restore
+             base_commit.  The compiled .so files stay in the venv just as they
+             would in the official Docker image.
+          4. If no environment_setup_commit, run the same editable install from
+             the current commit (best-effort).
 
-        Runs best-effort: failures are logged but do not abort the run.
+        All steps after venv creation are best-effort: failures are logged but
+        do not abort the run.
         """
         workspace_dir = workspace_dir.resolve()
         python_version = (
@@ -302,16 +251,17 @@ class WorkspacePreparer:
             if progress:
                 progress(f"{prefix} {msg}")
 
-        def _uv_pip(*args: str, extra_env: dict[str, str] | None = None) -> None:
+        def _uv_pip(*args: str) -> None:
             self._run_captured(
                 ["uv", "pip", "install", "--python", str(venv_python)] + list(args),
                 cwd=workspace_dir,
-                extra_env=extra_env,
+                extra_env=_BUILD_ENV,
             )
 
+        def _git(*args: str) -> None:
+            self._run_captured(["git"] + list(args), cwd=workspace_dir)
+
         # ── Step 1: resolve Python and create venv ─────────────────────────────
-        # Use `uv python find` to get the absolute path so uv never silently
-        # falls back to the system Python when the requested version is available.
         python_executable: str | None = None
         try:
             _log(f"resolving Python {python_version} via uv")
@@ -350,73 +300,53 @@ class WorkspacePreparer:
         except Exception as exc:  # noqa: BLE001
             _log(f"WARNING: could not verify venv Python — {exc}")
 
-        editable_args = _REPO_EDITABLE_INSTALL.get(task.repo)
+        # ── Step 2: pre-install build tools ────────────────────────────────────
+        pre_deps = list(_BUILD_PRE_DEPS) + list(self._config.provision_extra_packages)
+        try:
+            _log(f"installing build tools: {pre_deps}")
+            _uv_pip(*pre_deps)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"WARNING: build tool pre-install failed — {exc}")
 
-        # ── Step 2: pre-install packages ───────────────────────────────────────
-        # For repos with editable install: just build deps (extras list).
-        # For repos without: common baseline + extras + any user-supplied packages.
-        extras = _REPO_PROVISION_EXTRAS.get(task.repo, [])
-        if editable_args:
-            if extras:
-                try:
-                    _log(f"installing build deps: {extras}")
-                    _uv_pip(*extras)
-                except Exception as exc:  # noqa: BLE001
-                    _log(f"WARNING: build dep install failed — {exc}")
-        else:
-            packages = (
-                list(_COMMON_PROVISION_PACKAGES)
-                + list(self._config.provision_extra_packages)
-                + extras
-            )
-            try:
-                _log(f"installing packages: {packages}")
-                _uv_pip(*packages)
-            except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: package install failed — {exc}")
+        # ── Step 3: editable install from environment_setup_commit ─────────────
+        # Check out the commit used when the official Docker image was built,
+        # install the package (compiling all C/Cython extensions against the
+        # venv's pinned build tools), then restore base_commit.  The .so files
+        # compiled here persist in the venv regardless of which source commit is
+        # active, exactly matching the Docker environment.
+        env_commit = task.environment_setup_commit
+        base_commit = task.base_commit
 
-        # ── Step 3: editable install (mirrors official harness `install` command) ──
-        # uv venv does not create venv/bin/pip, so we use `uv pip install` which
-        # handles editable installs and delegates to the build backend (setuptools/
-        # Cython) to compile extensions into the venv's site-packages.
-        if editable_args:
-            _log(f"running editable install: uv pip install {' '.join(editable_args)}")
-            build_env = _REPO_EDITABLE_INSTALL_ENV.get(task.repo)
-            if build_env:
-                _log(f"injecting build env: {build_env}")
+        if env_commit:
+            _log(f"checking out environment_setup_commit {env_commit}")
             try:
-                _uv_pip(*editable_args, extra_env=build_env)
-                _log("editable install complete")
+                _git("checkout", env_commit)
             except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: editable install failed — {exc}; agent may lack compiled extensions")
+                _log(f"WARNING: could not checkout environment_setup_commit — {exc}; installing from current commit")
+                env_commit = None  # fall through to best-effort install below
 
-        # ── Step 4: file stubs (fallback for repos without editable install) ───
-        # With a successful editable install, C extensions are real compiled .so
-        # files — no stubs needed. Stubs are still supported for repos that cannot
-        # be editably installed.
-        stubs = _REPO_VERSION_STUBS.get(task.repo, [])
-        for rel_path, content in stubs:
-            target = workspace_dir / rel_path
+        install_ok = False
+        for install_spec in [".[test]", "."]:
             try:
-                target.write_text(content, encoding="utf-8")
-                _log(f"wrote stub: {rel_path}")
+                _log(f"running editable install: pip install -e {install_spec} --no-build-isolation")
+                _uv_pip("-e", install_spec, "--no-build-isolation", "--verbose")
+                _log(f"editable install complete ({install_spec})")
+                install_ok = True
+                break
             except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: could not write stub {rel_path} — {exc}")
+                if install_spec == ".[test]":
+                    _log(f".[test] extras failed ({exc}), retrying with bare -e .")
+                else:
+                    _log(f"WARNING: editable install failed — {exc}; agent may lack compiled extensions")
 
-        # Exclude stubs from git so they never appear in the agent's patch.diff.
-        if stubs:
-            exclude_file = workspace_dir / ".git" / "info" / "exclude"
+        if env_commit and base_commit:
             try:
-                existing = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
-                new_entries = [p for p, _ in stubs if p not in existing]
-                if new_entries:
-                    with exclude_file.open("a", encoding="utf-8") as fh:
-                        fh.write("\n# provision stubs – do not commit\n")
-                        for p in new_entries:
-                            fh.write(f"{p}\n")
-                    _log(f"excluded stubs from git: {new_entries}")
+                _log(f"restoring base_commit {base_commit}")
+                _git("checkout", base_commit)
             except Exception as exc:  # noqa: BLE001
-                _log(f"WARNING: could not update .git/info/exclude — {exc}")
+                _log(f"WARNING: could not restore base_commit — {exc}")
+
+        _ = install_ok  # reported via logs above
 
         _log("provision complete")
 
