@@ -13,10 +13,14 @@ dataset_split = "test"
 repo_cache_dir = ".cache/repos"
 grade_work_dir = ".cache/grades"
 
+auto_provision_runtime = true
+provision_python_version = "3.9"
+[harness.provision_python_versions]
+
 [adapters.mas_centralize]
-cwd = "/Users/cerberose/Work/mas-centralize"
+cwd = "/home/cerberose/mas-centralized"
 command = ["uv", "run", "python", "main.py", "run_swebench", "--task_path={run_dir}/task_context.json"]
 
 [adapters.mas_decentralized]
-cwd = "/Users/cerberose/Work/mas-decentralized"
+cwd = "/home/cerberose/mas-decentralized"
 command = ["uv", "run", "python", "main.py", "run_swebench", "--task_path={run_dir}/task_context.json"]

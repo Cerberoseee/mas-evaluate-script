@@ -1,0 +1,29 @@
+run_id = "benchmark"
+output_root = "."
+env_file = ".env"
+base_model = "gpt-5.4-mini"
+total_token_budget = 250000
+timeout_seconds = 1800
+repeats = 1
+arms = ["mas_centralize", "mas_decentralized"]
+
+[harness]
+dataset_name = "SWE-bench/SWE-bench_Lite"
+dataset_split = "test"
+repo_cache_dir = ".cache/repos"
+grade_work_dir = ".cache/grades"
+# Pre-provision a venv in workspace/venv/ before the agent starts.
+# Eliminates env-setup churn (PEP 668, missing hypothesis/pytest, np.core breakage).
+auto_provision_runtime = true
+# Default Python version; most SWE-bench Lite instances at 2021-2022 commits need <3.12.
+provision_python_version = "3.9"
+# Per-repo Python version overrides (org/repo format).
+[harness.provision_python_versions]
+
+[adapters.mas_centralize]
+cwd = "/Users/cerberose/Work/mas-centralize"
+command = ["uv", "run", "python", "main.py", "run_swebench", "--task_path={run_dir}/task_context.json"]
+
+[adapters.mas_decentralized]
+cwd = "/Users/cerberose/Work/mas-decentralized"
+command = ["uv", "run", "python", "main.py", "run_swebench", "--task_path={run_dir}/task_context.json"]

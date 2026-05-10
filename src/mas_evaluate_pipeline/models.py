@@ -111,6 +111,17 @@ class HarnessConfig(BaseModel):
     grade_command: list[str] | None = None
     prepare_command: list[str] | None = None
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # Runtime pre-provisioning — creates workspace/venv/ before the agent starts.
+    # Uses uv to avoid PEP 668 and to support per-repo Python versions.
+    auto_provision_runtime: bool = False
+    # Default Python version for provisioned venvs; overridden per-repo via provision_python_versions.
+    # 3.9 is a good baseline: it is managed by uv on this host and NumPy 1.24.x ships
+    # Python 3.9 wheels, satisfying the numpy<2 constraint for 2022-era repos like astropy.
+    provision_python_version: str = "3.9"
+    # Per-repo overrides, keyed by "org/repo" (e.g. "astropy/astropy").
+    provision_python_versions: dict[str, str] = Field(default_factory=dict)
+    # Extra packages to install in every provisioned venv (appended to the built-in common set).
+    provision_extra_packages: list[str] = Field(default_factory=list)
 
 
 class StudyConfig(BaseModel):

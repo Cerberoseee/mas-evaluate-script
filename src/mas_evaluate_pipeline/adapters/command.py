@@ -11,6 +11,25 @@ from ..models import AdapterConfig, FailureClass, RunArtifacts, RunStatus, TaskI
 from .base import BenchmarkAdapter
 
 
+def _prepend_workspace_venv_to_env(workspace_dir: Path, env: dict[str, str]) -> None:
+    """If workspace_dir/venv/bin exists, prepend it to PATH in *env*.
+
+    This injects the pre-provisioned venv into the subprocess's process
+    environment so every tool the agent spawns (pytest, pip, …) resolves
+    from the venv without relying on in-process PATH patching inside the
+    agent runtime.
+    """
+    for venv_name in ("venv", ".venv"):
+        bin_dir = workspace_dir / venv_name / "bin"
+        if bin_dir.is_dir():
+            venv_str = str(bin_dir)
+            current_path = env.get("PATH", "")
+            if not (current_path == venv_str or current_path.startswith(venv_str + os.pathsep)):
+                env["PATH"] = f"{venv_str}{os.pathsep}{current_path}"
+            env.setdefault("VIRTUAL_ENV", str(bin_dir.parent))
+            return
+
+
 class CommandAdapter(BenchmarkAdapter):
     def __init__(self, study_config, adapter_config: AdapterConfig) -> None:
         super().__init__(study_config)
@@ -68,6 +87,12 @@ class CommandAdapter(BenchmarkAdapter):
                 "WORKSPACE_GIT_ROOT": str(workspace_dir),
             }
         )
+
+        # If the harness pre-provisioned a venv in workspace/venv/, prepend its
+        # bin/ to PATH now so the entire subprocess inherits it.  This is more
+        # reliable than relying on the agent runtime's per-command PATH injection
+        # (which requires detecting the venv from the filesystem at run time).
+        _prepend_workspace_venv_to_env(workspace_dir, env)
 
         command = [item.format_map(mapping) for item in self.adapter_config.command]
         stdout_path = run_dir / "stdout.log"
