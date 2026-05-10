@@ -20,7 +20,7 @@ uv run mas-evaluate report --config study.example.toml --run-id example-study
 
 ### Config
 
-Use [study.example.toml](/Users/cerberose/Work/mas-evaluate-pipeline/study.example.toml) as the starting point.
+Use [study.example.toml](/Users/cerberose/Work/home/cerberose/mas-evaluate-pipeline/study.example.toml) as the starting point.
 
 Important knobs:
 

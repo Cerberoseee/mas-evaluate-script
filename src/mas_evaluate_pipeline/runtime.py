@@ -51,8 +51,6 @@ class BenchmarkRuntime:
         for arm in self.study_config.arms:
             adapter = self._make_adapter(arm)
             for task in manifest.tasks:
-                prompt = build_prompt(task, manifest.dataset_name, manifest.dataset_split)
-                prompt_digest = prompt_sha256(prompt)
                 for repeat_index in range(self.study_config.repeats):
                     completed_runs += 1
                     run_label = (
@@ -66,6 +64,11 @@ class BenchmarkRuntime:
                             progress(f"[skip] {run_label} existing_record={record_path}")
                         records.append(RunRecord.model_validate_json(record_path.read_text(encoding="utf-8")))
                         continue
+                    workspace_dir = run_dir / "workspace"
+                    prompt = build_prompt(
+                        task, manifest.dataset_name, manifest.dataset_split, workspace_dir=workspace_dir
+                    )
+                    prompt_digest = prompt_sha256(prompt)
                     if progress:
                         progress(f"[start] {run_label}")
                     run_dir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +79,6 @@ class BenchmarkRuntime:
                         json.dumps(task.model_dump(), indent=2),
                         encoding="utf-8",
                     )
-                    workspace_dir = run_dir / "workspace"
                     docs_metadata_path = run_dir / "task_metadata.json"
                     started_at = utc_now()
                     if progress:
@@ -165,17 +167,25 @@ class BenchmarkRuntime:
         raise ValueError(f"Unsupported arm: {arm}")
 
 
-def build_prompt(task: TaskInstance, dataset_name: str, dataset_split: str) -> str:
+def build_prompt(
+    task: TaskInstance,
+    dataset_name: str,
+    dataset_split: str,
+    *,
+    workspace_dir: Path | None = None,
+) -> str:
     hints = task.hints_text or "None"
     fail_to_pass = "\n".join(f"- {test}" for test in task.fail_to_pass) or "- Not provided"
     pass_to_pass = "\n".join(f"- {test}" for test in task.pass_to_pass) or "- Not provided"
+    workspace_line = f"Workspace path: {workspace_dir}\n" if workspace_dir is not None else ""
     return (
         f"SWE-bench dataset: {dataset_name} ({dataset_split})\n"
         f"Instance ID: {task.instance_id}\n"
         f"Repository: {task.repo}\n"
         f"Base commit: {task.base_commit or 'unknown'}\n"
-        f"Version: {task.version or 'unknown'}\n\n"
-        f"Problem statement:\n{task.problem_statement}\n\n"
+        f"Version: {task.version or 'unknown'}\n"
+        f"{workspace_line}"
+        f"\nProblem statement:\n{task.problem_statement}\n\n"
         f"Hints:\n{hints}\n\n"
         f"Fail-to-pass tests:\n{fail_to_pass}\n\n"
         f"Pass-to-pass tests:\n{pass_to_pass}\n"

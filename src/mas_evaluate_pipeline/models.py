@@ -111,9 +111,19 @@ class HarnessConfig(BaseModel):
     grade_command: list[str] | None = None
     prepare_command: list[str] | None = None
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # Docker-based execution: pull the official SWE-bench per-instance image and
+    # run the agent inside the container rather than on the host.  When True,
+    # host-side workspace cloning and venv provisioning are skipped entirely —
+    # the container already has the repo at base_commit and all C extensions
+    # compiled against the original build toolchain.
+    use_docker: bool = False
+    # Prefix of the SWE-bench per-instance Docker image name.
+    # Full image = f"{docker_image_prefix}.{instance_id}:{instance_image_tag}"
+    docker_image_prefix: str = "swebench/sweb.eval.x86_64"
     # Runtime pre-provisioning — creates workspace/venv/ before the agent starts.
     # Uses uv to avoid PEP 668 and to support per-repo Python versions.
-    auto_provision_runtime: bool = False
+    # Ignored when use_docker=True (the container provides the environment).
+    auto_provision_runtime: bool = True
     # Default Python version for provisioned venvs; overridden per-repo via provision_python_versions.
     # 3.9 is a good baseline: it is managed by uv on this host and NumPy 1.24.x ships
     # Python 3.9 wheels, satisfying the numpy<2 constraint for 2022-era repos like astropy.

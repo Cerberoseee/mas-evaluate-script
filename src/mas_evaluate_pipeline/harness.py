@@ -58,6 +58,16 @@ _BUILD_ENV: dict[str, str] = {
 }
 
 
+def _swebench_docker_image(instance_id: str, *, prefix: str, tag: str) -> str:
+    """Return the Docker image name for a SWE-bench instance.
+
+    The SWE-bench project replaces ``__`` with ``_1776_`` when publishing
+    images because Docker doesn't allow consecutive underscores in names.
+    """
+    docker_id = instance_id.replace("__", "_1776_")
+    return f"{prefix}.{docker_id}:{tag}"
+
+
 def find_swebench_instance_report(run_dir: Path, record: RunRecord, instance_id: str) -> Path | None:
     """Return SWE-bench per-instance ``report.json`` if present."""
     run_dir = run_dir.resolve()
@@ -177,6 +187,18 @@ class WorkspacePreparer:
         *,
         progress: Callable[[str], None] | None = None,
     ) -> PreparedTask:
+        if self._config.use_docker:
+            return self._prepare_docker(task, workspace_dir, metadata_path, progress=progress)
+        return self._prepare_host(task, workspace_dir, metadata_path, progress=progress)
+
+    def _prepare_host(
+        self,
+        task: TaskInstance,
+        workspace_dir: Path,
+        metadata_path: Path,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> PreparedTask:
         workspace_dir.parent.mkdir(parents=True, exist_ok=True)
         source_repo = self._ensure_source_repo(task, progress=progress)
         if workspace_dir.exists():
@@ -190,6 +212,57 @@ class WorkspacePreparer:
             if progress:
                 progress(f"[prepare-workspace] checking out base_commit={task.base_commit}")
             self._run(["git", "checkout", task.base_commit], cwd=workspace_dir)
+        self._write_task_metadata(metadata_path, task)
+        if self._config.auto_provision_runtime:
+            self._provision_runtime(workspace_dir, task, progress=progress)
+        return PreparedTask(
+            task=task,
+            workspace_dir=str(workspace_dir),
+            metadata_path=str(metadata_path),
+            source_repo_dir=str(source_repo),
+        )
+
+    def _prepare_docker(
+        self,
+        task: TaskInstance,
+        workspace_dir: Path,
+        metadata_path: Path,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> PreparedTask:
+        """Pull the official SWE-bench per-instance Docker image.
+
+        No host-side git clone or venv provisioning is done — the container
+        already has the repo checked out at base_commit with every C extension
+        compiled against the original Ubuntu 22.04 / GCC 11 toolchain.
+
+        The host-side workspace_dir is created as an empty marker so the rest
+        of the pipeline has a stable path reference.
+        """
+        image = _swebench_docker_image(
+            task.instance_id,
+            prefix=self._config.docker_image_prefix,
+            tag=self._config.instance_image_tag,
+        )
+        if progress:
+            progress(f"[prepare-docker] pulling image={image}")
+        self._run(
+            ["docker", "pull", "--platform", "linux/amd64", image],
+            cwd=Path.cwd(),
+        )
+        if progress:
+            progress(f"[prepare-docker] image ready: {image}")
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        self._write_task_metadata(metadata_path, task)
+        return PreparedTask(
+            task=task,
+            workspace_dir=str(workspace_dir),
+            metadata_path=str(metadata_path),
+            source_repo_dir=None,
+        )
+
+    @staticmethod
+    def _write_task_metadata(metadata_path: Path, task: TaskInstance) -> None:
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(
             json.dumps(
@@ -205,14 +278,6 @@ class WorkspacePreparer:
                 indent=2,
             ),
             encoding="utf-8",
-        )
-        if self._config.auto_provision_runtime:
-            self._provision_runtime(workspace_dir, task, progress=progress)
-        return PreparedTask(
-            task=task,
-            workspace_dir=str(workspace_dir),
-            metadata_path=str(metadata_path),
-            source_repo_dir=str(source_repo),
         )
 
     def _provision_runtime(

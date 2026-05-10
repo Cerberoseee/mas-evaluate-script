@@ -1,0 +1,101 @@
+{
+  "dataset_name": "SWE-bench/SWE-bench_Lite",
+  "dataset_split": "test",
+  "created_at": "2026-05-09T11:20:27.573506Z",
+  "selection_strategy": "repo_balanced_round_robin",
+  "tasks": [
+    {
+      "instance_id": "sphinx-doc__sphinx-7686",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "752d3285d250bbaf673cff25e83f03f247502021",
+      "problem_statement": "autosummary: The members variable for module template contains imported members\n**Describe the bug**\r\nautosummary: The members variable for module template contains imported members even if autosummary_imported_members is False.\r\n\r\n**To Reproduce**\r\n\r\n```\r\n# _templates/autosummary/module.rst\r\n{{ fullname | escape | underline }}\r\n\r\n.. automodule:: {{ fullname }}\r\n\r\n   .. autosummary::\r\n   {% for item in members %}\r\n      {{ item }}\r\n   {%- endfor %}\r\n\r\n```\r\n```\r\n# example.py\r\nimport os\r\n```\r\n```\r\n# index.rst\r\n.. autosummary::\r\n   :toctree: generated\r\n\r\n   example\r\n```\r\n```\r\n# conf.py\r\nautosummary_generate = True\r\nautosummary_imported_members = False\r\n```\r\n\r\nAs a result, I got following output:\r\n```\r\n# generated/example.rst\r\nexample\r\n=======\r\n\r\n.. automodule:: example\r\n\r\n   .. autosummary::\r\n\r\n      __builtins__\r\n      __cached__\r\n      __doc__\r\n      __file__\r\n      __loader__\r\n      __name__\r\n      __package__\r\n      __spec__\r\n      os\r\n```\r\n\r\n**Expected behavior**\r\nThe template variable `members` should not contain imported members when `autosummary_imported_members` is False.\r\n\r\n**Your project**\r\nNo\r\n\r\n**Screenshots**\r\nNo\r\n\r\n**Environment info**\r\n- OS: Mac\r\n- Python version: 3.8.2\r\n- Sphinx version: 3.1.0dev\r\n- Sphinx extensions:  sphinx.ext.autosummary\r\n- Extra tools: No\r\n\r\n**Additional context**\r\nNo\r\n\n",
+      "version": "3.1",
+      "hints_text": "",
+      "fail_to_pass": [
+        "tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module",
+        "tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module_skipped"
+      ],
+      "pass_to_pass": [
+        "tests/test_ext_autosummary.py::test_mangle_signature",
+        "tests/test_ext_autosummary.py::test_escaping",
+        "tests/test_ext_autosummary.py::test_autosummary_generate",
+        "tests/test_ext_autosummary.py::test_autosummary_generate_overwrite1",
+        "tests/test_ext_autosummary.py::test_autosummary_generate_overwrite2",
+        "tests/test_ext_autosummary.py::test_autosummary_recursive",
+        "tests/test_ext_autosummary.py::test_autosummary_latex_table_colspec",
+        "tests/test_ext_autosummary.py::test_import_by_name",
+        "tests/test_ext_autosummary.py::test_autosummary_imported_members",
+        "tests/test_ext_autosummary.py::test_generate_autosummary_docs_property",
+        "tests/test_ext_autosummary.py::test_autosummary_skip_member",
+        "tests/test_ext_autosummary.py::test_autosummary_template",
+        "tests/test_ext_autosummary.py::test_empty_autosummary_generate",
+        "tests/test_ext_autosummary.py::test_invalid_autosummary_generate",
+        "tests/test_ext_autosummary.py::test_autogen"
+      ],
+      "environment_setup_commit": "5afc77ee27fc01c57165ab260d3a76751f9ddb35",
+      "metadata": {
+        "patch": "diff --git a/sphinx/ext/autosummary/generate.py b/sphinx/ext/autosummary/generate.py\n--- a/sphinx/ext/autosummary/generate.py\n+++ b/sphinx/ext/autosummary/generate.py\n@@ -18,6 +18,7 @@\n \"\"\"\n \n import argparse\n+import inspect\n import locale\n import os\n import pkgutil\n@@ -176,6 +177,56 @@ def render(self, template_name: str, context: Dict) -> str:\n # -- Generating output ---------------------------------------------------------\n \n \n+class ModuleScanner:\n+    def __init__(self, app: Any, obj: Any) -> None:\n+        self.app = app\n+        self.object = obj\n+\n+    def get_object_type(self, name: str, value: Any) -> str:\n+        return get_documenter(self.app, value, self.object).objtype\n+\n+    def is_skipped(self, name: str, value: Any, objtype: str) -> bool:\n+        try:\n+            return self.app.emit_firstresult('autodoc-skip-member', objtype,\n+                                             name, value, False, {})\n+        except Exception as exc:\n+            logger.warning(__('autosummary: failed to determine %r to be documented, '\n+                              'the following exception was raised:\\n%s'),\n+                           name, exc, type='autosummary')\n+            return False\n+\n+    def scan(self, imported_members: bool) -> List[str]:\n+        members = []\n+        for name in dir(self.object):\n+            try:\n+                value = safe_getattr(self.object, name)\n+            except AttributeError:\n+                value = None\n+\n+            objtype = self.get_object_type(name, value)\n+            if self.is_skipped(name, value, objtype):\n+                continue\n+\n+            try:\n+                if inspect.ismodule(value):\n+                    imported = True\n+                elif safe_getattr(value, '__module__') != self.object.__name__:\n+                    imported = True\n+                else:\n+                    imported = False\n+            except AttributeError:\n+                imported = False\n+\n+            if imported_members:\n+                # list all members up\n+                members.append(name)\n+            elif imported is False:\n+                # list not-imported members up\n+                members.append(name)\n+\n+        return members\n+\n+\n def generate_autosummary_content(name: str, obj: Any, parent: Any,\n                                  template: AutosummaryRenderer, template_name: str,\n                                  imported_members: bool, app: Any,\n@@ -246,7 +297,8 @@ def get_modules(obj: Any) -> Tuple[List[str], List[str]]:\n     ns.update(context)\n \n     if doc.objtype == 'module':\n-        ns['members'] = dir(obj)\n+        scanner = ModuleScanner(app, obj)\n+        ns['members'] = scanner.scan(imported_members)\n         ns['functions'], ns['all_functions'] = \\\n             get_members(obj, {'function'}, imported=imported_members)\n         ns['classes'], ns['all_classes'] = \\\n",
+        "test_patch": "diff --git a/tests/roots/test-ext-autosummary/autosummary_dummy_module.py b/tests/roots/test-ext-autosummary/autosummary_dummy_module.py\n--- a/tests/roots/test-ext-autosummary/autosummary_dummy_module.py\n+++ b/tests/roots/test-ext-autosummary/autosummary_dummy_module.py\n@@ -1,4 +1,4 @@\n-from os import *  # NOQA\n+from os import path  # NOQA\n from typing import Union\n \n \n@@ -17,7 +17,23 @@ def baz(self):\n         pass\n \n \n-def bar(x: Union[int, str], y: int = 1):\n+class _Baz:\n+    pass\n+\n+\n+def bar(x: Union[int, str], y: int = 1) -> None:\n+    pass\n+\n+\n+def _quux():\n+    pass\n+\n+\n+class Exc(Exception):\n+    pass\n+\n+\n+class _Exc(Exception):\n     pass\n \n \ndiff --git a/tests/test_ext_autosummary.py b/tests/test_ext_autosummary.py\n--- a/tests/test_ext_autosummary.py\n+++ b/tests/test_ext_autosummary.py\n@@ -19,7 +19,10 @@\n from sphinx.ext.autosummary import (\n     autosummary_table, autosummary_toc, mangle_signature, import_by_name, extract_summary\n )\n-from sphinx.ext.autosummary.generate import AutosummaryEntry, generate_autosummary_docs, main as autogen_main\n+from sphinx.ext.autosummary.generate import (\n+    AutosummaryEntry, generate_autosummary_content, generate_autosummary_docs,\n+    main as autogen_main\n+)\n from sphinx.testing.util import assert_node, etree_parse\n from sphinx.util.docutils import new_document\n from sphinx.util.osutil import cd\n@@ -189,6 +192,83 @@ def test_escaping(app, status, warning):\n     assert str_content(title) == 'underscore_module_'\n \n \n+@pytest.mark.sphinx(testroot='ext-autosummary')\n+def test_autosummary_generate_content_for_module(app):\n+    import autosummary_dummy_module\n+    template = Mock()\n+\n+    generate_autosummary_content('autosummary_dummy_module', autosummary_dummy_module, None,\n+                                 template, None, False, app, False, {})\n+    assert template.render.call_args[0][0] == 'module'\n+\n+    context = template.render.call_args[0][1]\n+    assert context['members'] == ['Exc', 'Foo', '_Baz', '_Exc', '__builtins__',\n+                                  '__cached__', '__doc__', '__file__', '__name__',\n+                                  '__package__', '_quux', 'bar', 'qux']\n+    assert context['functions'] == ['bar']\n+    assert context['all_functions'] == ['_quux', 'bar']\n+    assert context['classes'] == ['Foo']\n+    assert context['all_classes'] == ['Foo', '_Baz']\n+    assert context['exceptions'] == ['Exc']\n+    assert context['all_exceptions'] == ['Exc', '_Exc']\n+    assert context['attributes'] == ['qux']\n+    assert context['all_attributes'] == ['qux']\n+    assert context['fullname'] == 'autosummary_dummy_module'\n+    assert context['module'] == 'autosummary_dummy_module'\n+    assert context['objname'] == ''\n+    assert context['name'] == ''\n+    assert context['objtype'] == 'module'\n+\n+\n+@pytest.mark.sphinx(testroot='ext-autosummary')\n+def test_autosummary_generate_content_for_module_skipped(app):\n+    import autosummary_dummy_module\n+    template = Mock()\n+\n+    def skip_member(app, what, name, obj, skip, options):\n+        if name in ('Foo', 'bar', 'Exc'):\n+            return True\n+\n+    app.connect('autodoc-skip-member', skip_member)\n+    generate_autosummary_content('autosummary_dummy_module', autosummary_dummy_module, None,\n+                                 template, None, False, app, False, {})\n+    context = template.render.call_args[0][1]\n+    assert context['members'] == ['_Baz', '_Exc', '__builtins__', '__cached__', '__doc__',\n+                                  '__file__', '__name__', '__package__', '_quux', 'qux']\n+    assert context['functions'] == []\n+    assert context['classes'] == []\n+    assert context['exceptions'] == []\n+\n+\n+@pytest.mark.sphinx(testroot='ext-autosummary')\n+def test_autosummary_generate_content_for_module_imported_members(app):\n+    import autosummary_dummy_module\n+    template = Mock()\n+\n+    generate_autosummary_content('autosummary_dummy_module', autosummary_dummy_module, None,\n+                                 template, None, True, app, False, {})\n+    assert template.render.call_args[0][0] == 'module'\n+\n+    context = template.render.call_args[0][1]\n+    assert context['members'] == ['Exc', 'Foo', 'Union', '_Baz', '_Exc', '__builtins__',\n+                                  '__cached__', '__doc__', '__file__', '__loader__',\n+                                  '__name__', '__package__', '__spec__', '_quux',\n+                                  'bar', 'path', 'qux']\n+    assert context['functions'] == ['bar']\n+    assert context['all_functions'] == ['_quux', 'bar']\n+    assert context['classes'] == ['Foo']\n+    assert context['all_classes'] == ['Foo', '_Baz']\n+    assert context['exceptions'] == ['Exc']\n+    assert context['all_exceptions'] == ['Exc', '_Exc']\n+    assert context['attributes'] == ['qux']\n+    assert context['all_attributes'] == ['qux']\n+    assert context['fullname'] == 'autosummary_dummy_module'\n+    assert context['module'] == 'autosummary_dummy_module'\n+    assert context['objname'] == ''\n+    assert context['name'] == ''\n+    assert context['objtype'] == 'module'\n+\n+\n @pytest.mark.sphinx('dummy', testroot='ext-autosummary')\n def test_autosummary_generate(app, status, warning):\n     app.builder.build_all()\n",
+        "created_at": "2020-05-17T14:09:10Z"
+      }
+    },
+    {
+      "instance_id": "sympy__sympy-12171",
+      "repo": "sympy/sympy",
+      "base_commit": "ca6ef27272be31c9dc3753ede9232c39df9a75d8",
+      "problem_statement": "matematica code printer does not handle floats and derivatives correctly\nIn its current state the mathematica code printer does not handle Derivative(func(vars), deriver) \r\ne.g. Derivative(f(t), t) yields Derivative(f(t), t) instead of D[f[t],t]\r\n\r\nAlso floats with exponents are not handled correctly e.g. 1.0e-4 is not converted to 1.0*^-4\r\n\r\nThis has an easy fix by adding the following lines to MCodePrinter:\r\n\r\n\r\ndef _print_Derivative(self, expr):\r\n        return \"D[%s]\" % (self.stringify(expr.args, \", \"))\r\n\r\ndef _print_Float(self, expr):\r\n        res =str(expr)\r\n        return res.replace('e','*^') \r\n\r\n\r\n\n",
+      "version": "1.0",
+      "hints_text": "I would like to work on this issue\nSo, should I add the lines in printing/mathematica.py ?\nI've tested the above code by adding these methods to a class derived from MCodePrinter and I was able to export an ODE system straight to NDSolve in Mathematica.\r\n\r\nSo I guess simply adding them to MCodePrinter in in printing/mathematica.py would fix the issue",
+      "fail_to_pass": [
+        "test_Derivative"
+      ],
+      "pass_to_pass": [
+        "test_Integer",
+        "test_Rational",
+        "test_Function",
+        "test_Pow",
+        "test_Mul",
+        "test_constants",
+        "test_containers",
+        "test_Integral"
+      ],
+      "environment_setup_commit": "50b81f9f6be151014501ffac44e5dc6b2416938f",
+      "metadata": {
+        "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -109,6 +109,9 @@ def _print_Integral(self, expr):\n     def _print_Sum(self, expr):\n         return \"Hold[Sum[\" + ', '.join(self.doprint(a) for a in expr.args) + \"]]\"\n \n+    def _print_Derivative(self, expr):\n+        return \"Hold[D[\" + ', '.join(self.doprint(a) for a in expr.args) + \"]]\"\n+\n \n def mathematica_code(expr, **settings):\n     r\"\"\"Converts an expr to a string of the Wolfram Mathematica code\n",
+        "test_patch": "diff --git a/sympy/printing/tests/test_mathematica.py b/sympy/printing/tests/test_mathematica.py\n--- a/sympy/printing/tests/test_mathematica.py\n+++ b/sympy/printing/tests/test_mathematica.py\n@@ -1,5 +1,5 @@\n from sympy.core import (S, pi, oo, symbols, Function,\n-                        Rational, Integer, Tuple)\n+                        Rational, Integer, Tuple, Derivative)\n from sympy.integrals import Integral\n from sympy.concrete import Sum\n from sympy.functions import exp, sin, cos\n@@ -74,6 +74,14 @@ def test_Integral():\n         \"{y, -Infinity, Infinity}]]\"\n \n \n+def test_Derivative():\n+    assert mcode(Derivative(sin(x), x)) == \"Hold[D[Sin[x], x]]\"\n+    assert mcode(Derivative(x, x)) == \"Hold[D[x, x]]\"\n+    assert mcode(Derivative(sin(x)*y**4, x, 2)) == \"Hold[D[y^4*Sin[x], x, x]]\"\n+    assert mcode(Derivative(sin(x)*y**4, x, y, x)) == \"Hold[D[y^4*Sin[x], x, y, x]]\"\n+    assert mcode(Derivative(sin(x)*y**4, x, y, 3, x)) == \"Hold[D[y^4*Sin[x], x, y, y, y, x]]\"\n+\n+\n def test_Sum():\n     assert mcode(Sum(sin(x), (x, 0, 10))) == \"Hold[Sum[Sin[x], {x, 0, 10}]]\"\n     assert mcode(Sum(exp(-x**2 - y**2),\n",
+        "created_at": "2017-02-13T18:20:56Z"
+      }
+    },
+    {
+      "instance_id": "astropy__astropy-6938",
+      "repo": "astropy/astropy",
+      "base_commit": "c76af9ed6bb89bfba45b9f5bc1e635188278e2fa",
+      "problem_statement": "Possible bug in io.fits related to D exponents\nI came across the following code in ``fitsrec.py``:\r\n\r\n```python\r\n        # Replace exponent separator in floating point numbers\r\n        if 'D' in format:\r\n            output_field.replace(encode_ascii('E'), encode_ascii('D'))\r\n```\r\n\r\nI think this may be incorrect because as far as I can tell ``replace`` is not an in-place operation for ``chararray`` (it returns a copy). Commenting out this code doesn't cause any tests to fail so I think this code isn't being tested anyway.\n",
+      "version": "1.3",
+      "hints_text": "It is tested with `astropy/io/fits/tests/test_checksum.py:test_ascii_table_data` but indeed the operation is not inplace and it does not fail. Using 'D' is probably better, but since #5362 (I had vague memory about something like this ^^, see also #5353) anyway 'D' and 'E' are read as double, so I think there is not difference on Astropy side.",
+      "fail_to_pass": [
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_ascii_table_data",
+        "astropy/io/fits/tests/test_table.py::TestTableFunctions::test_ascii_table"
+      ],
+      "pass_to_pass": [
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_sample_file",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_image_create",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data_auto_rescale",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_uint16_data",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_groups_hdu_data",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_open_with_no_keywords",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_writeto_convenience",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_hdu_writeto",
+        "astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_datasum_only",
+        "astropy/io/fits/tests/test_table.py::test_regression_scalar_indexing"
+      ],
+      "environment_setup_commit": "848c8fa21332abd66b44efe3cb48b72377fb32cc",
+      "metadata": {
+        "patch": "diff --git a/astropy/io/fits/fitsrec.py b/astropy/io/fits/fitsrec.py\n--- a/astropy/io/fits/fitsrec.py\n+++ b/astropy/io/fits/fitsrec.py\n@@ -1261,7 +1261,7 @@ def _scale_back_ascii(self, col_idx, input_field, output_field):\n \n         # Replace exponent separator in floating point numbers\n         if 'D' in format:\n-            output_field.replace(encode_ascii('E'), encode_ascii('D'))\n+            output_field[:] = output_field.replace(b'E', b'D')\n \n \n def _get_recarray_field(array, key):\n",
+        "test_patch": "diff --git a/astropy/io/fits/tests/test_checksum.py b/astropy/io/fits/tests/test_checksum.py\n--- a/astropy/io/fits/tests/test_checksum.py\n+++ b/astropy/io/fits/tests/test_checksum.py\n@@ -205,9 +205,9 @@ def test_ascii_table_data(self):\n                 # The checksum ends up being different on Windows, possibly due\n                 # to slight floating point differences\n                 assert 'CHECKSUM' in hdul[1].header\n-                assert hdul[1].header['CHECKSUM'] == '51IDA1G981GCA1G9'\n+                assert hdul[1].header['CHECKSUM'] == '3rKFAoI94oICAoI9'\n                 assert 'DATASUM' in hdul[1].header\n-                assert hdul[1].header['DATASUM'] == '1948208413'\n+                assert hdul[1].header['DATASUM'] == '1914653725'\n \n     def test_compressed_image_data(self):\n         with fits.open(self.data('comp.fits')) as h1:\ndiff --git a/astropy/io/fits/tests/test_table.py b/astropy/io/fits/tests/test_table.py\n--- a/astropy/io/fits/tests/test_table.py\n+++ b/astropy/io/fits/tests/test_table.py\n@@ -298,6 +298,19 @@ def test_ascii_table(self):\n         hdul = fits.open(self.temp('toto.fits'))\n         assert comparerecords(hdu.data, hdul[1].data)\n         hdul.close()\n+\n+        # Test Scaling\n+\n+        r1 = np.array([11., 12.])\n+        c2 = fits.Column(name='def', format='D', array=r1, bscale=2.3,\n+                         bzero=0.6)\n+        hdu = fits.TableHDU.from_columns([c2])\n+        hdu.writeto(self.temp('toto.fits'), overwrite=True)\n+        with open(self.temp('toto.fits')) as f:\n+            assert '4.95652173913043548D+00' in f.read()\n+        with fits.open(self.temp('toto.fits')) as hdul:\n+            assert comparerecords(hdu.data, hdul[1].data)\n+\n         a.close()\n \n     def test_endianness(self):\n",
+        "created_at": "2017-12-07T00:01:14Z"
+      }
+    }
+  ]
+}

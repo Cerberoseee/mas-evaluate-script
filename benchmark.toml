@@ -1,7 +1,7 @@
 run_id = "benchmark"
 output_root = "."
 env_file = ".env"
-base_model = "gpt-5.4-mini"
+base_model = "gpt-5-mini"
 total_token_budget = 250000
 timeout_seconds = 1800
 repeats = 1

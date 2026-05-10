@@ -1,7 +1,7 @@
 run_id = "example-study"
 output_root = "."
 env_file = ".env"
-base_model = "gpt-4o-mini"
+base_model = "gpt-5-mini"
 total_token_budget = 250000
 timeout_seconds = 1800
 repeats = 1
@@ -13,7 +13,8 @@ dataset_split = "test"
 repo_cache_dir = ".cache/repos"
 grade_work_dir = ".cache/grades"
 
-auto_provision_runtime = true
+use_docker = true
+auto_provision_runtime = false  # Docker image provides the env; no host compilation needed
 provision_python_version = "3.9"
 [harness.provision_python_versions]
 
