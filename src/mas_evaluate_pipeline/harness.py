@@ -270,7 +270,6 @@ class WorkspacePreparer:
         )
         venv_dir = workspace_dir / "venv"
         venv_python = venv_dir / "bin" / "python"
-        venv_pip = venv_dir / "bin" / "pip"
         prefix = f"[provision] repo={task.repo} python={python_version}"
 
         def _log(msg: str) -> None:
@@ -351,15 +350,13 @@ class WorkspacePreparer:
                 _log(f"WARNING: package install failed — {exc}")
 
         # ── Step 3: editable install (mirrors official harness `install` command) ──
-        # Uses the venv's pip directly so the build system (setuptools/Cython)
-        # compiles extensions into the venv's site-packages.
+        # uv venv does not create venv/bin/pip, so we use `uv pip install` which
+        # handles editable installs and delegates to the build backend (setuptools/
+        # Cython) to compile extensions into the venv's site-packages.
         if editable_args:
-            _log(f"running editable install: pip install {' '.join(editable_args)}")
+            _log(f"running editable install: uv pip install {' '.join(editable_args)}")
             try:
-                self._run_captured(
-                    [str(venv_pip), "install"] + list(editable_args),
-                    cwd=workspace_dir,
-                )
+                _uv_pip(*editable_args)
                 _log("editable install complete")
             except Exception as exc:  # noqa: BLE001
                 _log(f"WARNING: editable install failed — {exc}; agent may lack compiled extensions")
