@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -56,6 +57,24 @@ def run_benchmark(
     typer.echo(f"Completed or reused {len(records)} run records.")
 
 
+def _grade_runs_logger(runs_root: Path) -> tuple[logging.Logger, list[logging.Handler]]:
+    runs_root.mkdir(parents=True, exist_ok=True)
+    log = logging.getLogger(f"{__name__}.grade_runs")
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    file_handler = logging.FileHandler(runs_root / "grade_runs.log", encoding="utf-8")
+    file_handler.setFormatter(fmt)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    log.addHandler(file_handler)
+    log.addHandler(stream_handler)
+    return log, [file_handler, stream_handler]
+
+
 @app.command("grade-runs")
 def grade_runs(
     config_path: Path = typer.Option(..., "--config"),
@@ -67,26 +86,61 @@ def grade_runs(
     task_lookup = {task.instance_id: task for task in manifest.tasks}
     runs_root = Path(study_config.output_root) / "runs" / run_id
     records = load_run_records(runs_root)
-    grader = OfficialHarnessGrader(study_config.harness)
-    for record in records:
-        task = task_lookup[record.instance_id]
-        if record.status != record.status.SUCCESS:
-            if record.grade.status == "skipped":
-                continue
-            record.grade.status = "skipped"
-            record.grade.resolved = False
-            record.failure_class = record.failure_class or FailureClass.GRADED_FAIL
-        else:
-            if record.grade.status == "graded":
-                continue
-            predictions_path = (Path(record.run_dir) / "predictions.jsonl").resolve()
-            predictions_path.write_text(json.dumps(predictions_entry(task, record)) + "\n", encoding="utf-8")
-            grade_path = (Path(record.run_dir) / "grade-result.json").resolve()
-            record.grade = grader.grade(task, record, predictions_path, grade_path)
-            record.grade_path = str(grade_path)
-            if not record.grade.resolved:
-                record.failure_class = classify_grading_failure(record.grade)
-        Path(record.run_dir, "run_record.json").write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    log, handlers = _grade_runs_logger(runs_root)
+    try:
+        log.info(
+            "grade-runs started run_id=%s runs_root=%s record_count=%d",
+            run_id,
+            runs_root,
+            len(records),
+        )
+        grader = OfficialHarnessGrader(study_config.harness)
+        for record in records:
+            print(record.model_dump_json(indent=2))
+            task = task_lookup[record.instance_id]
+            if record.status != record.status.SUCCESS:
+                if record.grade.status == "skipped":
+                    log.info(
+                        "skip instance_id=%s reason=run_not_success grade_already_skipped",
+                        record.instance_id,
+                    )
+                    continue
+                log.info(
+                    "mark skipped instance_id=%s run_status=%s",
+                    record.instance_id,
+                    record.status.value if hasattr(record.status, "value") else record.status,
+                )
+                record.grade.status = "skipped"
+                record.grade.resolved = False
+                record.failure_class = record.failure_class or FailureClass.GRADED_FAIL
+            else:
+                if record.grade.status == "graded":
+                    log.info(
+                        "skip instance_id=%s reason=already_graded resolved=%s",
+                        record.instance_id,
+                        record.grade.resolved,
+                    )
+                    continue
+                log.info("grading instance_id=%s run_dir=%s", record.instance_id, record.run_dir)
+                predictions_path = (Path(record.run_dir) / "predictions.jsonl").resolve()
+                predictions_path.write_text(json.dumps(predictions_entry(task, record)) + "\n", encoding="utf-8")
+                grade_path = (Path(record.run_dir) / "grade-result.json").resolve()
+                record.grade = grader.grade(task, record, predictions_path, grade_path)
+                record.grade_path = str(grade_path)
+                log.info(
+                    "graded instance_id=%s status=%s resolved=%s",
+                    record.instance_id,
+                    record.grade.status,
+                    record.grade.resolved,
+                )
+                if not record.grade.resolved:
+                    record.failure_class = classify_grading_failure(record.grade)
+            Path(record.run_dir, "run_record.json").write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        log.info("grade-runs finished run_id=%s", run_id)
+    finally:
+        for h in handlers:
+            log.removeHandler(h)
+            h.close()
     typer.echo(f"Graded runs under {runs_root}")
 
 
